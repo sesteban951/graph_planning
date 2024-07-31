@@ -1,11 +1,12 @@
-%% Search graph for path
+%% Search graph for paths
 clear;clf;clc;
 axis equal
 axis off
 tic
 
-% add path to polytope library
-addpath('./polytopes_2017_10_04_v1.9');
+% add path to libraries
+addpath('/home/sergio/projects/graph_planning'); 
+addpath('/home/sergio/repos/mosek/10.2/toolbox/r2017a');
 
 % problem parameters
 density = 50;
@@ -28,6 +29,9 @@ for i = 1:size(O,2)
     b_O{i} = b_iris;
 end
 
+% Define the environment
+E = 2*[-1 1; -1 -1; 1 -1; 1 1]' + [0; 0];
+
 % plot the walls of the environment
 hold on;
 line([-2 -2], [2 -2],'color','k')
@@ -45,13 +49,23 @@ for i = 1:size(O,2)
 end
 axis equal
 
-% sample a polytope in the free space
-N_polys = 10;
-n_verts = 4;
+% sample some polytopes in the free space
+N_polys = 10;  % number of poytopes in free space
+n_verts = 4;  % number of vertices of each polytope
 for i = 1:N_polys
-    V = sample_V_polytope(n_verts, A_x, b_x, A_O, b_O);
+
+    % rejection sample
+    % V{i} = sample_V_polytope(n_verts, A_x, b_x, A_O, b_O);
+
+    % IRIS sample
+    initial_point = rand(2,1)*2-1;
+    V{i} = sample_V_polytope_IRIS(E, O, initial_point);
+
+    % plot the polytope
     for j = 1:size(V,2)
-        patch(V(1,:),V(2,:),'b','facealpha',0.05)
+        V_ = V{j};
+        patch(V_(:,1), V_(:,2),'b','facealpha',0.05)
+        scatter(V_(:,1), V_(:,2),50,'b','filled')
     end
 end
 
@@ -70,7 +84,7 @@ disp(toc)
 % Auxillary functions
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-% sample V_polytope
+% sample V polytope via rejection sampling
 function V = sample_V_polytope(n_verts, A_x, b_x, A_O, b_O)
     
     % get the number of obstacles
@@ -87,7 +101,7 @@ function V = sample_V_polytope(n_verts, A_x, b_x, A_O, b_O)
     V_valid = false;
     while V_valid == false
         
-        % generate a random polytope whos vertices are in the free space
+        % generate a random polytope whos vertices are within environment bounds
         V = zeros(2, n_verts);
         n = 1;
         while n <= n_verts
@@ -110,19 +124,23 @@ function V = sample_V_polytope(n_verts, A_x, b_x, A_O, b_O)
         [A_sample, b_sample] = vert2lcon(V');
 
         % check if the polytope intersects any obstacles via linear program
+        opt_options = optimoptions('linprog', 'Display', 'none'); % Create options structure
         for i = 1:n_obs
+
+            % solve LP feasibility problem
             A = [A_sample; A_O{i}];
             b = [b_sample; b_O{i}];
-            [~, ~, exitflag] = linprog(ones(size(A,2), 1), A, b);
+            [~, ~, exitflag] = linprog(ones(size(A,2), 1), A, b, [], [], [], [], opt_options);
     
-            % the problem is infeasible, the polytope does not intersect the obstacle
+            % the problem is infeasible ==> the polytope does not intersect the obstacle
             if exitflag ~= -2
                 break
             end
             
-            % went though all obstacles and the polytope does not intersect any
+            % went through all obstacles and the polytope does not intersect any
             if i == n_obs
                 V_valid = true;
+                V = V';
                 break;
             end
         end
@@ -133,4 +151,19 @@ function V = sample_V_polytope(n_verts, A_x, b_x, A_O, b_O)
             break
         end
     end
+end
+
+% sample V polytope via IRIS
+function V_iris = sample_V_polytope_IRIS(E, O, initial_point)
+
+    % convert enviorment to H-representation
+    [A_E, b_E] = vert2lcon(E');
+
+    % inflate a region around the intial point
+    [A, b, ~, ~, ~]  = iris.inflate_region(O, A_E, b_E, initial_point);
+    
+    % convert to V-representation
+    V = lcon2vert(A, b);
+    K = convhull(V);
+    V_iris = V(K,:);
 end

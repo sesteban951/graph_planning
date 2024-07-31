@@ -2,11 +2,12 @@
 clear;clf;clc;
 axis equal
 axis off
-tic
 
-% add path to libraries
+% add path for libraries
 addpath('/home/sergio/projects/graph_planning'); 
 addpath('/home/sergio/repos/mosek/10.2/toolbox/r2017a');
+addpath("./polytopes_2017_10_04_v1.9");
+addpath("./chebycenter");
 
 % problem parameters
 density = 50;
@@ -50,39 +51,146 @@ end
 axis equal
 
 % sample some polytopes in the free space
-N_polys = 10;  % number of poytopes in free space
-n_verts = 4;  % number of vertices of each polytope
+tic
+N_polys = 15;  % number of poytopes in free space
+n_verts = 4;   % number of vertices of each polytope
 for i = 1:N_polys
 
     % rejection sample
-    % V{i} = sample_V_polytope(n_verts, A_x, b_x, A_O, b_O);
+    V{i} = sample_V_polytope(n_verts, A_x, b_x, A_O, b_O);
 
     % IRIS sample
-    initial_point = rand(2,1)*2-1;
-    V{i} = sample_V_polytope_IRIS(E, O, initial_point);
+    % initial_point = rand(2,1)*2-1;
+    % V{i} = sample_V_polytope_IRIS(E, O, initial_point);
+end
+fprintf("Time to generate polytopes: %f [sec]\n", toc)
 
-    % plot the polytope
-    for j = 1:size(V,2)
-        V_ = V{j};
-        patch(V_(:,1), V_(:,2),'b','facealpha',0.05)
-        scatter(V_(:,1), V_(:,2),50,'b','filled')
+% define the intial and end conditions
+IC = [-1.7 -1.7];
+EC = [1.7 1.7];
+
+% manually add a polytope for the initial and end conditions
+V_IC =  0.3 * [-1 1; -1 -1; 1 -1; 1 1]' + IC';
+V_EC =  0.3 * [-1 1; -1 -1; 1 -1; 1 1]' + EC';
+V{end+1} = V_IC;
+V{end+1} = V_EC;
+
+% compute chebychev circles of the generated polytopes
+[C, ~] = chebychev_circles(V);
+
+% plot polytope info
+for j = 1:size(V,2)
+    V_ = V{j};
+    patch(V_(1,:), V_(2,:),'b','facealpha',0.05) % plot the polytope
+    % scatter(V_(1,:), V_(2,:),50,'b','filled')    % plot the vertices
+    scatter(C{j}(1), C{j}(2),50,'m','filled')    % plot the chebychev center
+end
+
+% build the graph
+tic
+G = build_graph(V, C);
+e = G.Edges;
+msg = sprintf("Graph has %d nodes and %d edges", numnodes(G), numedges(G));
+disp(msg)
+disp(e)
+fprintf("Time to build graph: %f [sec]\n", toc)
+
+% plot all the edges
+for i = 1:size(e,1)
+
+    % extract the edge information
+    edge_vert_idx = e(i,"EndNodes").EndNodes;
+    edge_weight = e(i,"Weight").Weight;
+
+    % draw the edges
+    C1 = C{edge_vert_idx(1)};
+    C2 = C{edge_vert_idx(2)};
+
+    % plot the edge
+    line([C1(1) C2(1)], [C1(2) C2(2)], 'color', 'm', 'linestyle', '--', 'linewidth', 1)
+end
+
+% find the shortest path (if feasible)
+tic
+P = shortestpath(G, size(V,2)-1, size(V,2), "Method", "positive");
+fprintf("Time to find shortest path: %f [sec]\n", toc)
+
+% plot the shortest path
+if isempty(P)
+    msg = sprintf("No path found");
+    disp(msg)
+else
+    msg = sprintf("Shortest path found");
+    disp(msg)
+    P
+    for i = 1:size(P,2)-1
+        C1 = C{P(i)};
+        C2 = C{P(i+1)};
+        line([C1(1) C2(1)], [C1(2) C2(2)], 'color', 'k', 'linewidth', 3)
     end
 end
 
-% define the intial and end conditions
-IC = [-1.9 -1.9];
-EC = [1.9 1.9];
-
 % plot the initial and end conditions
-scatter(IC(1), IC(2),50,'r','filled')
-scatter(EC(1), EC(2),50,'g','filled')
-
-disp("Done.")
-disp(toc)
+scatter(IC(1), IC(2),100,'r','filled')
+scatter(EC(1), EC(2),100,'g','filled')
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 % Auxillary functions
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% build a graph given a list of V-polytopes
+function G = build_graph(V, C)
+
+    % define an index for each polytope
+    V_index = 1:size(V,2);
+    V_combos = nchoosek(V_index,2);
+    num_combos = size(V_combos,1);
+
+    % instantiate the graph
+    G = graph();
+
+    % add all the nodes to the graph
+    G = addnode(G, size(V,2));
+
+    % check if there is interesection between each pair of polytopes
+    for i = 1:num_combos
+
+        % get the two polytopes
+        V1 = V{V_combos(i,1)};
+        V2 = V{V_combos(i,2)};
+
+        % check if the polytopes intersect
+        V_intersection = intersection_polytopes(V1, V2);
+        
+        % add an edge to the graph if there is an intersection
+        if ~isempty(V_intersection)
+            weight = norm(C{V_combos(i,1)} - C{V_combos(i,2)});
+            G = addedge(G, V_combos(i,1), V_combos(i,2), weight);
+        end
+    end
+
+end
+
+% compute the intersection of two polytopes
+function V = intersection_polytopes(V1, V2)
+    I = intersectionHull('vert', V1', 'vert', V2');
+    V = I.vert';
+end
+
+% function to compute chebychev centers
+function [C, R] = chebychev_circles(V)
+    
+    % get the chebychev centers and radii of the polytopes
+    num_polytopes = size(V,2);
+    C = cell(1, num_polytopes);
+    R = cell(1, num_polytopes);
+    for i = 1:num_polytopes
+        [A, b] = vert2lcon(V{i}');
+        [c, r] = chebycenter(A, b);
+        C{i} = c;
+        R{i} = r;
+    end
+end
 
 % sample V polytope via rejection sampling
 function V = sample_V_polytope(n_verts, A_x, b_x, A_O, b_O)
@@ -132,7 +240,7 @@ function V = sample_V_polytope(n_verts, A_x, b_x, A_O, b_O)
             b = [b_sample; b_O{i}];
             [~, ~, exitflag] = linprog(ones(size(A,2), 1), A, b, [], [], [], [], opt_options);
     
-            % the problem is infeasible ==> the polytope does not intersect the obstacle
+            % the problem is feasible ==> the polytope intersects an obstacle
             if exitflag ~= -2
                 break
             end
@@ -140,7 +248,6 @@ function V = sample_V_polytope(n_verts, A_x, b_x, A_O, b_O)
             % went through all obstacles and the polytope does not intersect any
             if i == n_obs
                 V_valid = true;
-                V = V';
                 break;
             end
         end
@@ -165,5 +272,5 @@ function V_iris = sample_V_polytope_IRIS(E, O, initial_point)
     % convert to V-representation
     V = lcon2vert(A, b);
     K = convhull(V);
-    V_iris = V(K,:);
+    V_iris = V(K,:)';
 end
